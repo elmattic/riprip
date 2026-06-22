@@ -77,6 +77,7 @@ mod mmc {
     pub(super) const TOC_FORMAT_FULL: u8 = 0x02;
     pub(super) const TOC_FORMAT_PMA: u8 = 0x03;
     pub(super) const TOC_FORMAT_ATIP: u8 = 0x04;
+    pub(super) const TOC_FORMAT_CDTEXT: u8 = 0x05;
 
     pub(super) const CTRL_DATA_TRACK: u8 = 0x04; // 1 = Data track, 0 = Audio track
 
@@ -153,6 +154,309 @@ mod usb_if {
     }
 }
 
+mod cdtext {
+    use std::collections::HashMap;
+
+    use crate::language::Language;
+
+    #[derive(Debug)]
+    pub(super) enum Encoding {
+        Iso8859_1,
+        Ascii,
+        ShiftJis,
+        EucKr,
+    }
+
+    impl TryFrom<u8> for Encoding {
+        type Error = u8;
+
+        fn try_from(value: u8) -> Result<Self, Self::Error> {
+            match value {
+                0x00 => Ok(Self::Iso8859_1),
+                0x01 => Ok(Self::Ascii),
+                0x80 => Ok(Self::ShiftJis),
+                0x81 => Ok(Self::EucKr),
+                unmapped => Err(unmapped),
+            }
+        }
+    }
+
+    impl Encoding {
+        /// Converts raw text pack bytes into a valid Rust UTF-8 String.
+        pub(super) fn decode(&self, bytes: &[u8]) -> String {
+            match self {
+                Self::Iso8859_1 | Self::Ascii => {
+                    // Try to parse directly as UTF-8/ASCII first without looping.
+                    match std::str::from_utf8(bytes) {
+                        Ok(valid_str) => valid_str.to_string(),
+                        Err(_) => {
+                            bytes.iter().map(|&b| b as char).collect()
+                        }
+                    }
+                }
+                Self::ShiftJis => {
+                    encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned()
+                }
+                Self::EucKr => {
+                    encoding_rs::EUC_KR.decode(bytes).0.into_owned()
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub(super) struct LanguageLayer {
+        pub language: Language,
+        pub album_title: Option<String>,
+        pub album_artist: Option<String>,
+        pub upc_ean: Option<String>,
+        pub track_titles: HashMap<u8, String>,
+        pub track_artists: HashMap<u8, String>,
+        pub track_isrcs: HashMap<u8, String>,
+    }
+
+    impl LanguageLayer {
+        /// Returns the album title with the leading artist name and any extra spacing stripped out.
+        pub(super) fn album_title(&self) -> Option<&str> {
+            let title = self.album_title.as_ref()?;
+            title
+                .strip_prefix(self.album_artist.as_ref()?)
+                .map(|s| s.trim_start())
+                .or(Some(title))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub(super) struct Metadata {
+        pub layers: Vec<LanguageLayer>,
+    }
+
+    #[derive(Debug)]
+    pub(super) enum Error {
+        InvalidPack,
+        InvalidEncoding,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    #[repr(C, packed)]
+    struct SizeInfo {
+        pub char_code: u8,
+        pub first_track: u8,
+        pub last_track: u8,
+        pub mode4_flags: u8,
+        pub pack_count_80: u8,
+        pub pack_count_81: u8,
+        pub pack_count_82: u8,
+        pub pack_count_83: u8,
+        pub pack_count_84: u8,
+        pub pack_count_85: u8,
+        pub pack_count_86: u8,
+        pub pack_count_87: u8,
+        pub pack_count_88: u8,
+        pub pack_count_89: u8,
+        pub pack_count_8a: u8,
+        pub pack_count_8b: u8,
+        pub pack_count_8c: u8,
+        pub pack_count_8d: u8,
+        pub pack_count_8e: u8,
+        pub pack_count_8f: u8,
+        pub last_seq_num: u8,
+        pub language_code: u8,
+        pub reserved_22_35: [u8; 14],
+    }
+
+    impl SizeInfo {
+        fn from_bytes(bytes: [u8; 36]) -> Self {
+            let mut reserved_22_35 = [0u8; 14];
+            reserved_22_35.copy_from_slice(&bytes[22..36]);
+
+            Self {
+                char_code: bytes[0],
+                first_track: bytes[1],
+                last_track: bytes[2],
+                mode4_flags: bytes[3],
+                pack_count_80: bytes[4],
+                pack_count_81: bytes[5],
+                pack_count_82: bytes[6],
+                pack_count_83: bytes[7],
+                pack_count_84: bytes[8],
+                pack_count_85: bytes[9],
+                pack_count_86: bytes[10],
+                pack_count_87: bytes[11],
+                pack_count_88: bytes[12],
+                pack_count_89: bytes[13],
+                pack_count_8a: bytes[14],
+                pack_count_8b: bytes[15],
+                pack_count_8c: bytes[16],
+                pack_count_8d: bytes[17],
+                pack_count_8e: bytes[18],
+                pack_count_8f: bytes[19],
+                last_seq_num: bytes[20],
+                language_code: bytes[21],
+                reserved_22_35,
+            }
+        }
+    }
+
+    impl Metadata {
+        pub(super) fn parse(buf: &[u8]) -> Result<Option<Self>, Error> {
+            #[derive(Debug, Default)]
+            struct Block {
+                pub is_double_byte: bool,
+                pub title_stream: Vec<u8>,
+                pub artist_stream: Vec<u8>,
+            }
+
+            /// Validates a raw 18-byte CD-Text pack using its trailing 2-byte CRC.
+            fn is_pack_valid(pack: &[u8]) -> bool {
+                use crc::{Algorithm, Crc};
+
+                // Define the exact CD-Text CRC-16 specification parameters.
+                const CDTEXT_CRC: Algorithm<u16> = Algorithm {
+                    width: 16,
+                    poly: 0x1021,
+                    init: 0x0000,
+                    refin: false,
+                    refout: false,
+                    xorout: 0xFFFF,
+                    check: 0x2B8C,
+                    residue: 0x0000,
+                };
+
+                const ENGINE: Crc<u16> = Crc::<u16>::new(&CDTEXT_CRC);
+
+                // Extract the expected CRC from the pack.
+                let expected_crc = u16::from_be_bytes([pack[16], pack[17]]);
+
+                ENGINE.checksum(&pack[0..16]) == expected_crc
+            }
+
+            fn extract_strings(stream: &[u8], encoding: &Encoding, is_double_byte: bool) -> Vec<String> {
+                if is_double_byte {
+                    // Find all the 2-byte aligned [0, 0] boundaries to slice directly.
+                    let mut strings = Vec::new();
+                    let mut start = 0;
+                    
+                    for i in (0..stream.len()).step_by(2) {
+                        if i + 1 < stream.len() && stream[i..i+2] == [0x00, 0x00] {
+                            if i > start {
+                                let s = encoding.decode(&stream[start..i]);
+                                let trimmed = s.trim();
+                                if !trimmed.is_empty() {
+                                    strings.push(trimmed.to_string());
+                                }
+                            }
+                            start = i + 2; // Move past the double-null delimiter.
+                        }
+                    }
+                    // Grab trailing slice if there's no ending delimiter.
+                    if start < stream.len() {
+                        let s = encoding.decode(&stream[start..]);
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            strings.push(trimmed.to_string());
+                        }
+                    }
+                    strings
+                } else {
+                    // Standard single-byte split.
+                    stream.split(|&b| b == 0x00)
+                        .map(|chunk| encoding.decode(chunk))
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                }
+            }
+
+            if buf.len() < 4 {
+                return Ok(None);
+            }
+            let text_data_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+            if text_data_len == 0 {
+                return Ok(None);
+            }
+
+            let mut blocks: HashMap<u8, Block> = HashMap::default();
+            let mut size_info_stream = [0u8; 36];
+
+            // Skip the header.
+            let pack_data = &buf[4..];
+            for pack in pack_data.chunks_exact(18) {
+                if !is_pack_valid(pack) {
+                    return Err(Error::InvalidPack);
+                }
+
+                let pack_type = pack[0];
+                let payload = &pack[4..16];
+                match pack_type {
+                    0x80 | 0x81 => {
+                        //  Byte 3 Bitmask Layout:
+                        // +---+---+---+---+---+---+---+---+
+                        // | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
+                        // +---+---+---+---+---+---+---+---+
+                        //   |   \_______/   \___________/
+                        //   |       |             |
+                        //   |       |             +--> Bits 0-3: Character Position (0 to 15)
+                        //   |       +----------------> Bits 4-6: Block Number / Language Index (0 to 7)
+                        //   +------------------------> Bit    7: Double-Byte Mode Flag (0 = ASCII/Latin-1, 1 = Shift-JIS)
+                        let byte_3 = pack[3];
+                        let language_block = (byte_3 >> 4) & 0x07; // Bits 4-6 define the language block ID.
+                        let is_double_byte = (byte_3 & 0x80) != 0;
+
+                        let block = blocks.entry(language_block).or_insert(Block {
+                            is_double_byte,
+                            title_stream: vec![],
+                            artist_stream: vec![],
+                        });
+                        // TODO: ensure is_double_byte is consistent for all packs of a block
+                        if pack_type == 0x80 {
+                            block.title_stream.extend_from_slice(payload);
+                        } else {
+                            block.artist_stream.extend_from_slice(payload);
+                        }
+                    }
+                    0x8F => {
+                        // Size Info Packs
+                        let start = pack[1] as usize * 12;
+                        size_info_stream[start..start + 12].copy_from_slice(payload);
+                    }
+                    _ => {}
+                }
+            }
+
+            let size_info = SizeInfo::from_bytes(size_info_stream);
+            dbg!(size_info);
+            let language = Language::try_from(size_info.language_code).unwrap();
+            let encoding = Encoding::try_from(size_info.char_code).unwrap();
+
+            let mut metadata = Self::default();
+            for (id, block) in blocks {
+                let mut layer = LanguageLayer::default();
+                layer.language = language;
+
+                let titles = extract_strings(&block.title_stream, &encoding, block.is_double_byte);
+                if let Some((album_title, track_titles)) = titles.split_first() {
+                    layer.album_title = Some(album_title.clone());
+                    for (track, title) in track_titles.iter().enumerate() {
+                        layer.track_titles.insert(track as u8 + 1, title.clone());
+                    }
+                }
+                let artists = extract_strings(&block.artist_stream, &encoding, block.is_double_byte);
+                if let Some((album_artist, track_artists)) = artists.split_first() {
+                    layer.album_artist = Some(album_artist.clone());
+                    for (track, artist) in track_artists.iter().enumerate() {
+                        layer.track_artists.insert(track as u8 + 1, artist.clone());
+                    }
+                }
+
+                metadata.layers.push(layer);
+            }
+
+            Ok(Some(metadata))
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Endpoints {
     pub bulk_in: u8,
@@ -201,6 +505,8 @@ pub(super) struct LibusbInstance<C: UsbContext = GlobalContext> {
     endpoints: Endpoints,
 
     cbw_tag: AtomicU32,
+
+    cdtext: Option<Vec<u8>>,
 }
 
 impl<C: UsbContext> Drop for LibusbInstance<C> {
@@ -299,12 +605,22 @@ impl<C: UsbContext> LibusbInstance<C> {
             setuid(Uid::from_raw(original_uid)).unwrap();
         }
 
-        Ok(Self {
+        let mut instance = Self {
             device_handle,
             interface_id,
             endpoints,
             cbw_tag: AtomicU32::new(0x10000001),
-        })
+            cdtext: None,
+        };
+        if let Some(buf) = instance.read_cdtext() {
+            let metadata = cdtext::Metadata::parse(&buf);
+            println!("{:#?}", metadata);
+            // println!("{:?}", metadata.unwrap().unwrap().layers[0].album_title());
+
+            instance.cdtext.replace(buf);
+        }
+
+        Ok(instance)
     }
 }
 
@@ -387,6 +703,36 @@ impl<T: UsbContext> LibusbInstance<T> {
             2 => Err(RipRipError::Bug("USB BOT phase error.")),
             _ => Err(RipRipError::Bug("Undefined status code.")),
         }
+    }
+
+    fn read_cdtext(&self) -> Option<Vec<u8>> {
+        const TOC_LEN: u16 = 2048;
+
+        let mut cmd = [0u8; 10];
+        cmd[0] = mmc::READ_TOC;
+        cmd[1] = 0x00; // Set to 0 for CD-Text.
+        cmd[2] = mmc::TOC_FORMAT_CDTEXT;
+        cmd[6] = 0x00; // Track number to start reading from (0 = entire disc).
+
+        let alloc_len: u16 = TOC_LEN;
+        cmd[7..9].copy_from_slice(&alloc_len.to_be_bytes());
+
+        let mut buf = vec![0u8; TOC_LEN as usize];
+        self.exec_scsi_read(&cmd, &mut buf).ok()?;
+
+        let len = u16::from_be_bytes([buf[0], buf[1]]);
+        dbg!(&len);
+
+        if len == 0 {
+            return None; // No CD-Text exists on this disc.
+        }
+
+        let total_valid_bytes = (len + 2) as usize;
+        let truncate_len = std::cmp::min(total_valid_bytes, buf.len());
+        dbg!(truncate_len);
+        buf.truncate(truncate_len);
+
+        Some(buf)
     }
 
     fn get_toc_header(&self) -> Result<(u8, u8), RipRipError> {
