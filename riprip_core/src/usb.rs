@@ -278,63 +278,50 @@ mod cdtext {
         pub char_code: u8,
         pub first_track: u8,
         pub last_track: u8,
-        pub mode4_flags: u8,
-        pub pack_count_80: u8,
-        pub pack_count_81: u8,
-        pub pack_count_82: u8,
-        pub pack_count_83: u8,
-        pub pack_count_84: u8,
-        pub pack_count_85: u8,
-        pub pack_count_86: u8,
-        pub pack_count_87: u8,
-        pub pack_count_88: u8,
-        pub pack_count_89: u8,
-        pub pack_count_8a: u8,
-        pub pack_count_8b: u8,
-        pub pack_count_8c: u8,
-        pub pack_count_8d: u8,
-        pub pack_count_8e: u8,
-        pub pack_count_8f: u8,
-        pub last_seq_num: u8,
-        pub language_code: u8,
-        pub reserved_22_35: [u8; 14],
+        pub copyright: u8,         // 3: CD-TEXT is copyrighted, 0: no copyright on CD-TEXT
+        pub pack_counts: [u8; 16], // 16 pack types (0x80 through 0x8F)
+        pub last_seq: [u8; 8],     // Last sequence number for blocks 0..7
+        pub lang_code: [u8; 8],    // Language code for blocks 0..7
     }
 
     impl SizeInfo {
         fn from_bytes(bytes: &[u8]) -> Self {
-            let mut reserved_22_35 = [0u8; 14];
-            reserved_22_35.copy_from_slice(&bytes[22..36]);
+            assert!(bytes.len() >= 36);
+
+            let mut pack_counts = [0u8; 16];
+            pack_counts.copy_from_slice(&bytes[4..20]);
+
+            let mut last_seq = [0u8; 8];
+            last_seq.copy_from_slice(&bytes[20..28]);
+
+            let mut lang_code = [0u8; 8];
+            lang_code.copy_from_slice(&bytes[28..36]);
 
             Self {
                 char_code: bytes[0],
                 first_track: bytes[1],
                 last_track: bytes[2],
-                mode4_flags: bytes[3],
-                pack_count_80: bytes[4],
-                pack_count_81: bytes[5],
-                pack_count_82: bytes[6],
-                pack_count_83: bytes[7],
-                pack_count_84: bytes[8],
-                pack_count_85: bytes[9],
-                pack_count_86: bytes[10],
-                pack_count_87: bytes[11],
-                pack_count_88: bytes[12],
-                pack_count_89: bytes[13],
-                pack_count_8a: bytes[14],
-                pack_count_8b: bytes[15],
-                pack_count_8c: bytes[16],
-                pack_count_8d: bytes[17],
-                pack_count_8e: bytes[18],
-                pack_count_8f: bytes[19],
-                last_seq_num: bytes[20],
-                language_code: bytes[21],
-                reserved_22_35,
+                copyright: bytes[3],
+                pack_counts,
+                last_seq,
+                lang_code,
             }
         }
     }
 
     impl Metadata {
         pub(super) fn parse(buf: &[u8]) -> Result<Option<Self>, Error> {
+            if buf.len() < 4 {
+                return Ok(None);
+            }
+
+            // Skip the header.
+            let pack_data = &buf[4..];
+
+            Self::parse_packs(pack_data)
+        }
+
+        fn parse_packs(pack_data: &[u8]) -> Result<Option<Self>, Error> {
             const PACK_LEN: usize = 18;
             const PACK_HEADER_LEN: usize = 4;
             const PACK_PAYLOAD_LEN: usize = 12;
@@ -343,11 +330,12 @@ mod cdtext {
             struct Block {
                 pub buffer: HashMap<(u8, u8), Vec<u8>>,
             }
+
             #[derive(Debug, Default)]
             struct Context {
                 pub text_buf: Vec<u8>,
                 pub language_blocks: Vec<Block>,
-            };
+            }
 
             impl Context {
                 pub(super) fn handle_pack(
@@ -426,14 +414,7 @@ mod cdtext {
                 ENGINE.checksum(&pack[0..16]) == expected_crc
             }
 
-            if buf.len() < 4 {
-                return Ok(None);
-            }
-
             let mut context = Context::default();
-
-            // Skip the header.
-            let pack_data = &buf[4..];
             for pack in pack_data.chunks_exact(PACK_LEN) {
                 if !is_pack_valid(pack) {
                     return Err(Error::InvalidPack);
@@ -442,16 +423,16 @@ mod cdtext {
             }
 
             let mut metadata = Self::default();
-            for block in context.language_blocks {
+            for (i, block) in context.language_blocks.iter().enumerate() {
                 let slice = block.buffer.get(&(0x8F, 0)).unwrap();
                 let size_info = SizeInfo::from_bytes(slice);
                 dbg!(size_info);
-                let language = Language::try_from(size_info.language_code).unwrap();
+                let language = Language::try_from(size_info.lang_code[i]).unwrap();
                 let encoding = Encoding::try_from(size_info.char_code).unwrap();
 
                 let mut layer = LanguageLayer::default();
                 layer.language = language;
-                for ((pack_type, track), buf) in block.buffer {
+                for (&(pack_type, track), buf) in block.buffer.iter() {
                     if let Ok(field) = Field::try_from(pack_type) {
                         let s = encoding.decode(&buf);
                         layer.catalog.insert((field, track), s.clone());
