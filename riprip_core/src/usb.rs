@@ -159,6 +159,38 @@ mod cdtext {
 
     use crate::language::Language;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
+    pub(super) enum Field {
+        Title,
+        Performer,
+        Songwriter,
+        Composer,
+        Message,
+        Arranger,
+        Genre,
+        DiscId,
+        UpcEan, // or ISRC for tracks
+    }
+
+    impl TryFrom<u8> for Field {
+        type Error = u8;
+
+        fn try_from(value: u8) -> Result<Self, Self::Error> {
+            match value {
+                0x80 => Ok(Field::Title),
+                0x81 => Ok(Field::Performer),
+                0x82 => Ok(Field::Songwriter),
+                0x83 => Ok(Field::Composer),
+                0x84 => Ok(Field::Arranger),
+                0x85 => Ok(Field::Message),
+                0x86 => Ok(Field::DiscId),
+                0x87 => Ok(Field::Genre),
+                0x8E => Ok(Field::UpcEan),
+                unmapped => Err(unmapped),
+            }
+        }
+    }
+
     #[derive(Debug)]
     pub(super) enum Encoding {
         Iso8859_1,
@@ -213,6 +245,8 @@ mod cdtext {
         pub track_titles: HashMap<u8, String>,
         pub track_artists: HashMap<u8, String>,
         pub track_isrcs: HashMap<u8, String>,
+        //
+        pub catalog: HashMap<(Field, u8), String>,
     }
 
     impl LanguageLayer {
@@ -235,6 +269,7 @@ mod cdtext {
     pub(super) enum Error {
         InvalidPack,
         InvalidEncoding,
+        Unsupported,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -266,7 +301,7 @@ mod cdtext {
     }
 
     impl SizeInfo {
-        fn from_bytes(bytes: [u8; 36]) -> Self {
+        fn from_bytes(bytes: &[u8]) -> Self {
             let mut reserved_22_35 = [0u8; 14];
             reserved_22_35.copy_from_slice(&bytes[22..36]);
 
@@ -300,11 +335,71 @@ mod cdtext {
 
     impl Metadata {
         pub(super) fn parse(buf: &[u8]) -> Result<Option<Self>, Error> {
-            #[derive(Debug, Default)]
+            const PACK_LEN: usize = 18;
+            const PACK_HEADER_LEN: usize = 4;
+            const PACK_PAYLOAD_LEN: usize = 12;
+
+            #[derive(Debug, Clone, Default)]
             struct Block {
-                pub is_double_byte: bool,
-                pub title_stream: Vec<u8>,
-                pub artist_stream: Vec<u8>,
+                pub buffer: HashMap<(u8, u8), Vec<u8>>,
+            }
+            #[derive(Debug, Default)]
+            struct Context {
+                pub text_buf: Vec<u8>,
+                pub language_blocks: Vec<Block>,
+            };
+
+            impl Context {
+                pub(super) fn handle_pack(
+                    &mut self,
+                    pack: &[u8],
+                ) -> Result<(), Error> {
+                    let header = &pack[0..PACK_HEADER_LEN];
+                    let payload = &pack[PACK_HEADER_LEN..PACK_HEADER_LEN + PACK_PAYLOAD_LEN];
+
+                    let (id1, id2, id3, id4) = (header[0], header[1], header[2], header[3]);
+
+                    let pack_type = id1;
+                    let is_extension = (id2 & 0x80) != 0; // Extension Flag (0 = normal, 1 = extension)
+                    if is_extension {
+                        return Err(Error::Unsupported);
+                    }
+                    let mut track_number = id2 & 0x7F;
+                    let sequence_number = id3;
+                    let block_id = (id4 >> 4) & 0x07; // Bits 4-6 define the language block ID.
+                    // let char_pos = id4 & 0x0f;
+
+                    self.language_blocks.resize(block_id as usize + 1, Block::default());
+
+                    // println!("{:?} {} {} {} {} {}", String::from_utf8_lossy(payload), pack_type, sequence_number, block_id, track_number, char_pos);
+
+                    let is_text = pack_type != 0x8F;
+                    if is_text {
+                        let char_pos = id4 & 0x0f;
+                        let is_double_byte = (id4 & 0x80) != 0;
+                        if !is_double_byte {
+                            for b in payload {
+                                if *b == 0x00 {
+                                    if !self.text_buf.is_empty() {
+                                        let key = (pack_type, track_number);
+                                        self.language_blocks[block_id as usize].buffer.insert(key, self.text_buf.clone());
+                                        self.text_buf.clear();
+                                    }
+                                    track_number += 1;
+                                } else {
+                                    self.text_buf.push(*b);
+                                }
+                            }
+                        } else {
+                            todo!()
+                        }
+                    } else {
+                        let key = (pack_type, 0);
+                        let buffer = self.language_blocks[block_id as usize].buffer.entry(key).or_insert(Default::default());
+                        buffer.extend_from_slice(payload);
+                    }
+                    Ok(())
+                }
             }
 
             /// Validates a raw 18-byte CD-Text pack using its trailing 2-byte CRC.
@@ -331,124 +426,46 @@ mod cdtext {
                 ENGINE.checksum(&pack[0..16]) == expected_crc
             }
 
-            fn extract_strings(stream: &[u8], encoding: &Encoding, is_double_byte: bool) -> Vec<String> {
-                if is_double_byte {
-                    // Find all the 2-byte aligned [0, 0] boundaries to slice directly.
-                    let mut strings = Vec::new();
-                    let mut start = 0;
-                    
-                    for i in (0..stream.len()).step_by(2) {
-                        if i + 1 < stream.len() && stream[i..i+2] == [0x00, 0x00] {
-                            if i > start {
-                                let s = encoding.decode(&stream[start..i]);
-                                let trimmed = s.trim();
-                                if !trimmed.is_empty() {
-                                    strings.push(trimmed.to_string());
-                                }
-                            }
-                            start = i + 2; // Move past the double-null delimiter.
-                        }
-                    }
-                    // Grab trailing slice if there's no ending delimiter.
-                    if start < stream.len() {
-                        let s = encoding.decode(&stream[start..]);
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            strings.push(trimmed.to_string());
-                        }
-                    }
-                    strings
-                } else {
-                    // Standard single-byte split.
-                    stream.split(|&b| b == 0x00)
-                        .map(|chunk| encoding.decode(chunk))
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                }
-            }
-
             if buf.len() < 4 {
                 return Ok(None);
             }
-            let text_data_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-            if text_data_len == 0 {
-                return Ok(None);
-            }
 
-            let mut blocks: HashMap<u8, Block> = HashMap::default();
-            let mut size_info_stream = [0u8; 36];
+            let mut context = Context::default();
 
             // Skip the header.
             let pack_data = &buf[4..];
-            for pack in pack_data.chunks_exact(18) {
+            for pack in pack_data.chunks_exact(PACK_LEN) {
                 if !is_pack_valid(pack) {
                     return Err(Error::InvalidPack);
                 }
-
-                let pack_type = pack[0];
-                let payload = &pack[4..16];
-                match pack_type {
-                    0x80 | 0x81 => {
-                        //  Byte 3 Bitmask Layout:
-                        // +---+---+---+---+---+---+---+---+
-                        // | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
-                        // +---+---+---+---+---+---+---+---+
-                        //   |   \_______/   \___________/
-                        //   |       |             |
-                        //   |       |             +--> Bits 0-3: Character Position (0 to 15)
-                        //   |       +----------------> Bits 4-6: Block Number / Language Index (0 to 7)
-                        //   +------------------------> Bit    7: Double-Byte Mode Flag (0 = ASCII/Latin-1, 1 = Shift-JIS)
-                        let byte_3 = pack[3];
-                        let language_block = (byte_3 >> 4) & 0x07; // Bits 4-6 define the language block ID.
-                        let is_double_byte = (byte_3 & 0x80) != 0;
-
-                        let block = blocks.entry(language_block).or_insert(Block {
-                            is_double_byte,
-                            title_stream: vec![],
-                            artist_stream: vec![],
-                        });
-                        // TODO: ensure is_double_byte is consistent for all packs of a block
-                        if pack_type == 0x80 {
-                            block.title_stream.extend_from_slice(payload);
-                        } else {
-                            block.artist_stream.extend_from_slice(payload);
-                        }
-                    }
-                    0x8F => {
-                        // Size Info Packs
-                        let start = pack[1] as usize * 12;
-                        size_info_stream[start..start + 12].copy_from_slice(payload);
-                    }
-                    _ => {}
-                }
+                context.handle_pack(pack).unwrap();
             }
 
-            let size_info = SizeInfo::from_bytes(size_info_stream);
-            dbg!(size_info);
-            let language = Language::try_from(size_info.language_code).unwrap();
-            let encoding = Encoding::try_from(size_info.char_code).unwrap();
-
             let mut metadata = Self::default();
-            for (id, block) in blocks {
+            for block in context.language_blocks {
+                let slice = block.buffer.get(&(0x8F, 0)).unwrap();
+                let size_info = SizeInfo::from_bytes(slice);
+                dbg!(size_info);
+                let language = Language::try_from(size_info.language_code).unwrap();
+                let encoding = Encoding::try_from(size_info.char_code).unwrap();
+
                 let mut layer = LanguageLayer::default();
                 layer.language = language;
+                for ((pack_type, track), buf) in block.buffer {
+                    if let Ok(field) = Field::try_from(pack_type) {
+                        let s = encoding.decode(&buf);
+                        layer.catalog.insert((field, track), s.clone());
+                    }
 
-                let titles = extract_strings(&block.title_stream, &encoding, block.is_double_byte);
-                if let Some((album_title, track_titles)) = titles.split_first() {
-                    layer.album_title = Some(album_title.clone());
-                    for (track, title) in track_titles.iter().enumerate() {
-                        layer.track_titles.insert(track as u8 + 1, title.clone());
+                    if pack_type == 0x80 {
+                        let s = encoding.decode(&buf);
+                        if track == 0 {
+                            layer.album_title = Some(s.clone());
+                            continue;
+                        }
+                        layer.track_titles.insert(track, s.clone());
                     }
                 }
-                let artists = extract_strings(&block.artist_stream, &encoding, block.is_double_byte);
-                if let Some((album_artist, track_artists)) = artists.split_first() {
-                    layer.album_artist = Some(album_artist.clone());
-                    for (track, artist) in track_artists.iter().enumerate() {
-                        layer.track_artists.insert(track as u8 + 1, artist.clone());
-                    }
-                }
-
                 metadata.layers.push(layer);
             }
 
