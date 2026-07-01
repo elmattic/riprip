@@ -193,10 +193,12 @@ mod cdtext {
 
     #[derive(Debug)]
     pub(super) enum Encoding {
+        /// ISO-8859-1 (8 bit), Latin-1
         Iso8859_1,
+        /// ASCII (7 bit)
         Ascii,
+        /// Shift-JIS (double byte)
         ShiftJis,
-        EucKr,
     }
 
     impl TryFrom<u8> for Encoding {
@@ -207,7 +209,6 @@ mod cdtext {
                 0x00 => Ok(Self::Iso8859_1),
                 0x01 => Ok(Self::Ascii),
                 0x80 => Ok(Self::ShiftJis),
-                0x81 => Ok(Self::EucKr),
                 unmapped => Err(unmapped),
             }
         }
@@ -228,9 +229,6 @@ mod cdtext {
                 }
                 Self::ShiftJis => {
                     encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned()
-                }
-                Self::EucKr => {
-                    encoding_rs::EUC_KR.decode(bytes).0.into_owned()
                 }
             }
         }
