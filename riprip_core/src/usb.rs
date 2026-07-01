@@ -234,6 +234,54 @@ mod cdtext {
         }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    #[repr(u8)]
+    enum GenreCode {
+        #[default]
+        Unused = 0,
+        Undefined = 1,
+        AdultContemporary = 2,
+        AlternativeRock = 3,
+        Childrens = 4,
+        Classical = 5,
+        ChristContemporary = 6,
+        Country = 7,
+        Dance = 8,
+        EasyListening = 9,
+        Erotic = 10,
+        Folk = 11,
+        Gospel = 12,
+        HipHop = 13,
+        Jazz = 14,
+        Latin = 15,
+        Musical = 16,
+        NewAge = 17,
+        Opera = 18,
+        Operetta = 19,
+        Pop = 20,
+        Rap = 21,
+        Reggae = 22,
+        Rock = 23,
+        RhythmAndBlues = 24,
+        SoundEffects = 25,
+        Soundtrack = 26,
+        SpokenWord = 27,
+        WorldMusic = 28,
+    }
+
+    impl TryFrom<u8> for GenreCode {
+        type Error = u8;
+
+        #[expect(unsafe_code, reason = "For FFI.")]
+        fn try_from(value: u8) -> Result<Self, Self::Error> {
+            if value <= Self::WorldMusic as u8 {
+                unsafe { Ok(std::mem::transmute(value)) }
+            } else {
+                Err(value)
+            }
+        }
+    }
+
     #[derive(Debug, Default)]
     pub(super) struct LanguageLayer {
         pub language: Language,
@@ -244,6 +292,8 @@ mod cdtext {
         pub track_artists: HashMap<u8, String>,
         pub track_isrcs: HashMap<u8, String>,
         //
+        pub first_track: u8,
+        pub last_track: u8,
         pub catalog: HashMap<(Field, u8), String>,
     }
 
@@ -255,6 +305,16 @@ mod cdtext {
                 .strip_prefix(self.album_artist.as_ref()?)
                 .map(|s| s.trim_start())
                 .or(Some(title))
+        }
+
+        pub(super) fn genre_code(&self) -> Option<GenreCode> {
+            let genre_str = self.catalog.get(&(Field::Genre, 0))?;
+            let bytes = genre_str.as_bytes();
+            
+            // The very first byte is our binary code.
+            let raw_code = *bytes.first()?;
+
+            GenreCode::try_from(raw_code).ok()
         }
     }
 
@@ -430,6 +490,8 @@ mod cdtext {
 
                 let mut layer = LanguageLayer::default();
                 layer.language = language;
+                layer.first_track = size_info.first_track;
+                layer.last_track = size_info.last_track;
                 for (&(pack_type, track), buf) in block.buffer.iter() {
                     if let Ok(field) = Field::try_from(pack_type) {
                         let s = encoding.decode(&buf);
