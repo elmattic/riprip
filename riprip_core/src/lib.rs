@@ -62,7 +62,6 @@ mod chk;
 mod disc;
 mod drive;
 mod error;
-mod language;
 mod rip;
 mod usb;
 
