@@ -290,7 +290,6 @@ mod cdtext {
         pub upc_ean: Option<String>,
         pub track_titles: HashMap<u8, String>,
         pub track_artists: HashMap<u8, String>,
-        pub track_isrcs: HashMap<u8, String>,
         //
         pub first_track: u8,
         pub last_track: u8,
@@ -432,6 +431,17 @@ mod cdtext {
                                         self.text_buf.clear();
                                     }
                                     track_number += 1;
+                                } else if *b == b'\t' {
+                                    // Handle repetition.
+                                    let last_key = (pack_type, track_number.saturating_sub(1));
+                                    let cloned_buf = self.language_blocks[block_id as usize]
+                                        .buffer
+                                        .get(&last_key)
+                                        .cloned();
+                                    if let Some(buf) = cloned_buf {
+                                        let key = (pack_type, track_number);
+                                        self.language_blocks[block_id as usize].buffer.insert(key, buf);
+                                    }
                                 } else {
                                     self.text_buf.push(*b);
                                 }
