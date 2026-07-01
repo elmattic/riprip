@@ -159,46 +159,44 @@ mod cdtext {
 
     use crate::language::Language;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[repr(u8)]
     pub(super) enum Field {
-        Title,
-        Performer,
-        Songwriter,
-        Composer,
-        Message,
-        Arranger,
-        Genre,
-        DiscId,
-        UpcEan, // or ISRC for tracks
+        Title = 0x80,
+        Performer = 0x81,
+        Songwriter = 0x82,
+        Composer = 0x83,
+        Arranger = 0x84,
+        Message = 0x85,
+        DiscId = 0x86,
+        Genre = 0x87,
+        /// UPC/EAN at the disc level or ISRC for individual tracks.
+        UpcEan = 0x8E,
     }
 
     impl TryFrom<u8> for Field {
         type Error = u8;
 
+        #[expect(unsafe_code, reason = "For FFI.")]
         fn try_from(value: u8) -> Result<Self, Self::Error> {
             match value {
-                0x80 => Ok(Field::Title),
-                0x81 => Ok(Field::Performer),
-                0x82 => Ok(Field::Songwriter),
-                0x83 => Ok(Field::Composer),
-                0x84 => Ok(Field::Arranger),
-                0x85 => Ok(Field::Message),
-                0x86 => Ok(Field::DiscId),
-                0x87 => Ok(Field::Genre),
-                0x8E => Ok(Field::UpcEan),
+                0x80..=0x87 | 0x8E => {
+                    unsafe { Ok(std::mem::transmute(value)) }
+                }
                 unmapped => Err(unmapped),
             }
         }
     }
 
-    #[derive(Debug)]
-    pub(super) enum Encoding {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[repr(u8)]
+    enum Encoding {
         /// ISO-8859-1 (8 bit), Latin-1
-        Iso8859_1,
+        Iso8859_1 = 0x00,
         /// ASCII (7 bit)
-        Ascii,
+        Ascii = 0x01,
         /// Shift-JIS (double byte)
-        ShiftJis,
+        ShiftJis = 0x80,
     }
 
     impl TryFrom<u8> for Encoding {
@@ -274,10 +272,9 @@ mod cdtext {
 
         #[expect(unsafe_code, reason = "For FFI.")]
         fn try_from(value: u8) -> Result<Self, Self::Error> {
-            if value <= Self::WorldMusic as u8 {
-                unsafe { Ok(std::mem::transmute(value)) }
-            } else {
-                Err(value)
+            match value {
+                0..=28 => unsafe { Ok(std::mem::transmute(value)) }
+                unmapped => Err(unmapped),
             }
         }
     }
@@ -510,7 +507,7 @@ mod cdtext {
     }
 
     #[cfg(test)]
-    mod tests {
+    mod test {
         use super::{Field, Metadata};
 
         fn dump(metadata: &Metadata) -> String {
@@ -573,7 +570,7 @@ mod cdtext {
         ];
 
         #[test]
-        fn test_libcdio_samples() {
+        fn t_libcdio_samples() {
             for (left, right) in SAMPLES {
                 let metadata = Metadata::parse_packs(left).unwrap().unwrap();
                 let dump = dump(&metadata).to_owned();
