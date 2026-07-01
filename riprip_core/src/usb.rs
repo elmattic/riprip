@@ -284,24 +284,18 @@ mod cdtext {
 
     #[derive(Debug, Default)]
     pub(super) struct LanguageLayer {
-        pub language: Language,
-        pub album_title: Option<String>,
-        pub album_artist: Option<String>,
-        pub upc_ean: Option<String>,
-        pub track_titles: HashMap<u8, String>,
-        pub track_artists: HashMap<u8, String>,
-        //
         pub first_track: u8,
         pub last_track: u8,
+        pub language: Language,
         pub catalog: HashMap<(Field, u8), String>,
     }
 
     impl LanguageLayer {
         /// Returns the album title with the leading artist name and any extra spacing stripped out.
         pub(super) fn album_title(&self) -> Option<&str> {
-            let title = self.album_title.as_ref()?;
+            let title = self.catalog.get(&(Field::Title, 0))?;
             title
-                .strip_prefix(self.album_artist.as_ref()?)
+                .strip_prefix(self.catalog.get(&(Field::Performer, 0))?)
                 .map(|s| s.trim_start())
                 .or(Some(title))
         }
@@ -494,27 +488,18 @@ mod cdtext {
             for (i, block) in context.language_blocks.iter().enumerate() {
                 let slice = block.buffer.get(&(0x8F, 0)).unwrap();
                 let size_info = SizeInfo::from_bytes(slice);
-                dbg!(size_info);
+                // dbg!(size_info);
                 let language = Language::try_from(size_info.lang_code[i]).unwrap();
                 let encoding = Encoding::try_from(size_info.char_code).unwrap();
 
                 let mut layer = LanguageLayer::default();
-                layer.language = language;
                 layer.first_track = size_info.first_track;
                 layer.last_track = size_info.last_track;
+                layer.language = language;
                 for (&(pack_type, track), buf) in block.buffer.iter() {
                     if let Ok(field) = Field::try_from(pack_type) {
                         let s = encoding.decode(&buf);
                         layer.catalog.insert((field, track), s.clone());
-                    }
-
-                    if pack_type == 0x80 {
-                        let s = encoding.decode(&buf);
-                        if track == 0 {
-                            layer.album_title = Some(s.clone());
-                            continue;
-                        }
-                        layer.track_titles.insert(track, s.clone());
                     }
                 }
                 metadata.layers.push(layer);
@@ -756,7 +741,7 @@ impl<C: UsbContext> LibusbInstance<C> {
         if let Some(buf) = instance.read_cdtext() {
             let metadata = cdtext::Metadata::parse(&buf);
             println!("{:#?}", metadata);
-            // println!("{:?}", metadata.unwrap().unwrap().layers[0].album_title());
+            println!("{:?}", metadata.unwrap().unwrap().layers[0].album_title());
 
             instance.cdtext.replace(buf);
         }
