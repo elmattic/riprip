@@ -523,6 +523,79 @@ mod cdtext {
             Ok(Some(metadata))
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Field, Metadata};
+
+        fn dump(metadata: &Metadata) -> String {
+            use std::fmt::Write;
+
+            fn dump_field(out: &mut String, label: &str, value: Option<&String>) {
+                if let Some(val) = value {
+                    writeln!(out, "\t{}: {}", label, val).unwrap();
+                }
+            }
+
+            let mut out = String::new();
+
+            writeln!(&mut out).unwrap();
+
+            for (idx, layer) in metadata.layers.iter().enumerate() {
+                writeln!(&mut out, "Language {} '{:?}':", idx, layer.language).unwrap();
+                writeln!(&mut out, "CD-TEXT for Disc:").unwrap();
+                
+                dump_field(&mut out, "TITLE", layer.catalog.get(&(Field::Title, 0)));
+                dump_field(&mut out, "PERFORMER", layer.catalog.get(&(Field::Performer, 0)));
+                dump_field(&mut out, "SONGWRITER", layer.catalog.get(&(Field::Songwriter, 0)));
+                dump_field(&mut out, "COMPOSER", layer.catalog.get(&(Field::Composer, 0)));
+                dump_field(&mut out, "MESSAGE", layer.catalog.get(&(Field::Message, 0)));
+                dump_field(&mut out, "ARRANGER", layer.catalog.get(&(Field::Arranger, 0)));
+                dump_field(&mut out, "UPC_EAN", layer.catalog.get(&(Field::UpcEan, 0)));
+                let genre = layer.catalog.get(&(Field::Genre, 0))
+                    .map(|s| s.chars().filter(|&c| !c.is_ascii_control()).collect::<String>());
+                dump_field(&mut out, "GENRE", genre.as_ref());
+                dump_field(&mut out, "DISC_ID", layer.catalog.get(&(Field::DiscId, 0)));
+                let genre_code = layer.genre_code().map(|c| format!("{} ({:?})", c as u8, c));
+                dump_field(&mut out, "GENRE_CODE", genre_code.as_ref());
+
+                for track in layer.first_track..=layer.last_track {
+                    writeln!(&mut out, "CD-TEXT for Track {:2}:", track).unwrap();
+
+                    dump_field(&mut out, "TITLE", layer.catalog.get(&(Field::Title, track)));
+                    dump_field(&mut out, "PERFORMER", layer.catalog.get(&(Field::Performer, track)));
+                    dump_field(&mut out, "SONGWRITER", layer.catalog.get(&(Field::Songwriter, track)));
+                    dump_field(&mut out, "COMPOSER", layer.catalog.get(&(Field::Composer, track)));
+                    dump_field(&mut out, "MESSAGE", layer.catalog.get(&(Field::Message, track)));
+                    dump_field(&mut out, "ARRANGER", layer.catalog.get(&(Field::Arranger, track)));
+                    dump_field(&mut out, "ISRC", layer.catalog.get(&(Field::UpcEan, track)));
+                }
+
+                writeln!(&mut out).unwrap();
+            }
+
+            out
+        }
+
+        // Both the `.cdt` binary payloads and their corresponding `.right` text fixtures
+        // originate from the upstream libcdio GitHub repository reference samples.
+        // Note: The text targets have been sanitized to align with our dump format by
+        // converting indentation spaces to standard tabs (`\t`) and adding a trailing newline.
+        const SAMPLES: [(&[u8], &str); 3] = [
+            (include_bytes!("fixtures/cdtext.cdt"), include_str!("fixtures/cdtext.right")),
+            (include_bytes!("fixtures/cdtext-libburnia.cdt"), include_str!("fixtures/cdtext-libburnia.right")),
+            (include_bytes!("fixtures/cdtext-krosis.cdt"), include_str!("fixtures/cdtext-krosis.right"))
+        ];
+
+        #[test]
+        fn test_libcdio_samples() {
+            for (left, right) in SAMPLES {
+                let metadata = Metadata::parse_packs(left).unwrap().unwrap();
+                let dump = dump(&metadata).to_owned();
+                assert_eq!(dump, right)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
