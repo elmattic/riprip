@@ -1,5 +1,5 @@
 /// Enumeration of possible CD-TEXT languages.
-/// 
+///
 /// The language code is encoded as specified in ANNEX 1 to part 5 of EBU
 /// Tech 32 58 -E (1991).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -118,9 +118,7 @@ impl TryFrom<u8> for Language {
     #[expect(unsafe_code, reason = "For FFI.")]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0x00..=0x2B | 0x45..=0x54 | 0x56..=0x7F => {
-                unsafe { Ok(std::mem::transmute(value)) }
-            }
+            0x00..=0x2B | 0x45..=0x54 | 0x56..=0x7F => unsafe { Ok(std::mem::transmute(value)) },
             unmapped => Err(unmapped),
         }
     }

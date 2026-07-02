@@ -23,9 +23,7 @@ impl TryFrom<u8> for Field {
     #[expect(unsafe_code, reason = "For FFI.")]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0x80..=0x87 | 0x8E => {
-                unsafe { Ok(std::mem::transmute(value)) }
-            }
+            0x80..=0x87 | 0x8E => unsafe { Ok(std::mem::transmute(value)) },
             unmapped => Err(unmapped),
         }
     }
@@ -63,14 +61,10 @@ impl Encoding {
                 // Try to parse directly as UTF-8/ASCII first without looping.
                 match std::str::from_utf8(bytes) {
                     Ok(valid_str) => valid_str.to_string(),
-                    Err(_) => {
-                        bytes.iter().map(|&b| b as char).collect()
-                    }
+                    Err(_) => bytes.iter().map(|&b| b as char).collect(),
                 }
             }
-            Self::ShiftJis => {
-                encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned()
-            }
+            Self::ShiftJis => encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned(),
         }
     }
 }
@@ -116,7 +110,7 @@ impl TryFrom<u8> for GenreCode {
     #[expect(unsafe_code, reason = "For FFI.")]
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0..=28 => unsafe { Ok(std::mem::transmute(value)) }
+            0..=28 => unsafe { Ok(std::mem::transmute(value)) },
             unmapped => Err(unmapped),
         }
     }
@@ -143,7 +137,7 @@ impl LanguageLayer {
     pub(super) fn genre_code(&self) -> Option<GenreCode> {
         let genre_str = self.catalog.get(&(Field::Genre, 0))?;
         let bytes = genre_str.as_bytes();
-        
+
         // The very first byte is our binary code.
         let raw_code = *bytes.first()?;
 
@@ -169,10 +163,10 @@ struct SizeInfo {
     pub char_code: u8,
     pub first_track: u8,
     pub last_track: u8,
-    pub copyright: u8,         // 3: CD-TEXT is copyrighted, 0: no copyright on CD-TEXT
+    pub copyright: u8, // 3: CD-TEXT is copyrighted, 0: no copyright on CD-TEXT
     pub pack_counts: [u8; 16], // 16 pack types (0x80 through 0x8F)
-    pub last_seq: [u8; 8],     // Last sequence number for blocks 0..7
-    pub lang_code: [u8; 8],    // Language code for blocks 0..7
+    pub last_seq: [u8; 8], // Last sequence number for blocks 0..7
+    pub lang_code: [u8; 8], // Language code for blocks 0..7
 }
 
 impl SizeInfo {
@@ -229,10 +223,7 @@ impl Metadata {
         }
 
         impl Context {
-            pub(super) fn handle_pack(
-                &mut self,
-                pack: &[u8],
-            ) -> Result<(), Error> {
+            pub(super) fn handle_pack(&mut self, pack: &[u8]) -> Result<(), Error> {
                 let header = &pack[0..PACK_HEADER_LEN];
                 let payload = &pack[PACK_HEADER_LEN..PACK_HEADER_LEN + PACK_PAYLOAD_LEN];
 
@@ -246,9 +237,10 @@ impl Metadata {
                 let mut track_number = id2 & 0x7F;
                 let sequence_number = id3;
                 let block_id = (id4 >> 4) & 0x07; // Bits 4-6 define the language block ID.
-                // let char_pos = id4 & 0x0f;
+                                                  // let char_pos = id4 & 0x0f;
 
-                self.language_blocks.resize(block_id as usize + 1, Block::default());
+                self.language_blocks
+                    .resize(block_id as usize + 1, Block::default());
 
                 // println!("{:?} {} {} {} {} {}", String::from_utf8_lossy(payload), pack_type, sequence_number, block_id, track_number, char_pos);
 
@@ -261,7 +253,9 @@ impl Metadata {
                             if *b == 0x00 {
                                 if !self.text_buf.is_empty() {
                                     let key = (pack_type, track_number);
-                                    self.language_blocks[block_id as usize].buffer.insert(key, self.text_buf.clone());
+                                    self.language_blocks[block_id as usize]
+                                        .buffer
+                                        .insert(key, self.text_buf.clone());
                                     self.text_buf.clear();
                                 }
                                 track_number += 1;
@@ -274,7 +268,9 @@ impl Metadata {
                                     .cloned();
                                 if let Some(buf) = cloned_buf {
                                     let key = (pack_type, track_number);
-                                    self.language_blocks[block_id as usize].buffer.insert(key, buf);
+                                    self.language_blocks[block_id as usize]
+                                        .buffer
+                                        .insert(key, buf);
                                 }
                             } else {
                                 self.text_buf.push(*b);
@@ -285,7 +281,10 @@ impl Metadata {
                     }
                 } else {
                     let key = (pack_type, 0);
-                    let buffer = self.language_blocks[block_id as usize].buffer.entry(key).or_insert(Default::default());
+                    let buffer = self.language_blocks[block_id as usize]
+                        .buffer
+                        .entry(key)
+                        .or_insert(Default::default());
                     buffer.extend_from_slice(payload);
                 }
                 Ok(())
@@ -407,9 +406,18 @@ mod test {
     // Note: The text targets have been sanitized to align with our dump format by
     // converting indentation spaces to standard tabs (`\t`) and adding a trailing newline.
     const SAMPLES: [(&[u8], &str); 3] = [
-        (include_bytes!("../../../fixtures/cdtext.cdt"), include_str!("../../../fixtures/cdtext.right")),
-        (include_bytes!("../../../fixtures/cdtext-libburnia.cdt"), include_str!("../../../fixtures/cdtext-libburnia.right")),
-        (include_bytes!("../../../fixtures/cdtext-krosis.cdt"), include_str!("../../../fixtures/cdtext-krosis.right"))
+        (
+            include_bytes!("../../../fixtures/cdtext.cdt"),
+            include_str!("../../../fixtures/cdtext.right"),
+        ),
+        (
+            include_bytes!("../../../fixtures/cdtext-libburnia.cdt"),
+            include_str!("../../../fixtures/cdtext-libburnia.right"),
+        ),
+        (
+            include_bytes!("../../../fixtures/cdtext-krosis.cdt"),
+            include_str!("../../../fixtures/cdtext-krosis.right"),
+        ),
     ];
 
     #[test]
