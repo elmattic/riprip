@@ -410,26 +410,24 @@ impl<T: UsbContext> LibusbInstance<T> {
 
         let mut cmd = [0u8; 10];
         cmd[0] = mmc::READ_TOC;
-        cmd[1] = 0x00; // Set to 0 for CD-Text.
         cmd[2] = mmc::TOC_FORMAT_CDTEXT;
         cmd[6] = 0x00; // Track number to start reading from (0 = entire disc).
 
-        let alloc_len: u16 = TOC_LEN;
+        let alloc_len = TOC_LEN;
         cmd[7..9].copy_from_slice(&alloc_len.to_be_bytes());
 
         let mut buf = vec![0u8; TOC_LEN as usize];
         self.exec_scsi_read(&cmd, &mut buf).ok()?;
 
         let len = u16::from_be_bytes([buf[0], buf[1]]);
-        dbg!(&len);
-
         if len == 0 {
             return None; // No CD-Text exists on this disc.
         }
 
+        // Commands like READ_TOC return a 2-byte header containing the data length.
+        // However, this length field excludes the 2 bytes of the length field itself.
         let total_valid_bytes = (len + 2) as usize;
         let truncate_len = std::cmp::min(total_valid_bytes, buf.len());
-        dbg!(truncate_len);
         buf.truncate(truncate_len);
 
         Some(buf)
