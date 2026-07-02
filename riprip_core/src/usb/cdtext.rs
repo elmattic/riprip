@@ -134,6 +134,20 @@ impl LanguageLayer {
             .or(Some(title))
     }
 
+    /// Returns the genre for a specific track, skipping the initial binary genre code byte.
+    pub(super) fn genre(&self, track: u8) -> Option<&str> {
+        self.catalog
+            .get(&(Field::Genre, track))
+            .and_then(|raw_string| {
+                let mut chars = raw_string.char_indices();
+                chars.next()?;
+                
+                let split_idx = chars.next().map(|(idx, _)| idx).unwrap_or(raw_string.len());
+                
+                Some(&raw_string[split_idx..])
+            })
+    }
+
     pub(super) fn genre_code(&self) -> Option<GenreCode> {
         let genre_str = self.catalog.get(&(Field::Genre, 0))?;
         let bytes = genre_str.as_bytes();
@@ -350,13 +364,13 @@ impl Metadata {
 
 #[cfg(test)]
 mod test {
-    use super::{Field, Metadata};
+    use super::{Field, Metadata, LanguageLayer};
 
     fn dump(metadata: &Metadata) -> String {
         use std::fmt::Write;
 
-        fn dump_field(out: &mut String, label: &str, value: Option<&String>) {
-            if let Some(val) = value {
+        fn dump_field(out: &mut String, label: &str, layer: &LanguageLayer, field: Field, track: u8) {
+            if let Some(val) = layer.catalog.get(&(field, track)) {
                 writeln!(out, "\t{}: {}", label, val).unwrap();
             }
         }
@@ -369,30 +383,31 @@ mod test {
             writeln!(&mut out, "Language {} '{:?}':", idx, layer.language).unwrap();
             writeln!(&mut out, "CD-TEXT for Disc:").unwrap();
             
-            dump_field(&mut out, "TITLE", layer.catalog.get(&(Field::Title, 0)));
-            dump_field(&mut out, "PERFORMER", layer.catalog.get(&(Field::Performer, 0)));
-            dump_field(&mut out, "SONGWRITER", layer.catalog.get(&(Field::Songwriter, 0)));
-            dump_field(&mut out, "COMPOSER", layer.catalog.get(&(Field::Composer, 0)));
-            dump_field(&mut out, "MESSAGE", layer.catalog.get(&(Field::Message, 0)));
-            dump_field(&mut out, "ARRANGER", layer.catalog.get(&(Field::Arranger, 0)));
-            dump_field(&mut out, "UPC_EAN", layer.catalog.get(&(Field::UpcEan, 0)));
-            let genre = layer.catalog.get(&(Field::Genre, 0))
-                .map(|s| s.chars().filter(|&c| !c.is_ascii_control()).collect::<String>());
-            dump_field(&mut out, "GENRE", genre.as_ref());
-            dump_field(&mut out, "DISC_ID", layer.catalog.get(&(Field::DiscId, 0)));
-            let genre_code = layer.genre_code().map(|c| format!("{} ({:?})", c as u8, c));
-            dump_field(&mut out, "GENRE_CODE", genre_code.as_ref());
+            dump_field(&mut out, "TITLE", layer, Field::Title, 0);
+            dump_field(&mut out, "PERFORMER", layer, Field::Performer, 0);
+            dump_field(&mut out, "SONGWRITER", layer, Field::Songwriter, 0);
+            dump_field(&mut out, "COMPOSER", layer, Field::Composer, 0);
+            dump_field(&mut out, "MESSAGE", layer, Field::Message, 0);
+            dump_field(&mut out, "ARRANGER", layer, Field::Arranger, 0);
+            dump_field(&mut out, "UPC_EAN", layer, Field::UpcEan, 0);
+            if let Some(genre) = layer.genre(0) {
+                writeln!(&mut out, "\tGENRE: {}", genre).unwrap();
+            }
+            dump_field(&mut out, "DISC_ID", layer, Field::DiscId, 0);
+            if let Some(genre_code) = layer.genre_code().map(|c| format!("{} ({:?})", c as u8, c)) {
+                writeln!(&mut out, "\tGENRE_CODE: {}", genre_code).unwrap();
+            }
 
             for track in layer.first_track..=layer.last_track {
                 writeln!(&mut out, "CD-TEXT for Track {:2}:", track).unwrap();
 
-                dump_field(&mut out, "TITLE", layer.catalog.get(&(Field::Title, track)));
-                dump_field(&mut out, "PERFORMER", layer.catalog.get(&(Field::Performer, track)));
-                dump_field(&mut out, "SONGWRITER", layer.catalog.get(&(Field::Songwriter, track)));
-                dump_field(&mut out, "COMPOSER", layer.catalog.get(&(Field::Composer, track)));
-                dump_field(&mut out, "MESSAGE", layer.catalog.get(&(Field::Message, track)));
-                dump_field(&mut out, "ARRANGER", layer.catalog.get(&(Field::Arranger, track)));
-                dump_field(&mut out, "ISRC", layer.catalog.get(&(Field::UpcEan, track)));
+                dump_field(&mut out, "TITLE", layer, Field::Title, track);
+                dump_field(&mut out, "PERFORMER", layer, Field::Performer, track);
+                dump_field(&mut out, "SONGWRITER", layer, Field::Songwriter, track);
+                dump_field(&mut out, "COMPOSER", layer, Field::Composer, track);
+                dump_field(&mut out, "MESSAGE", layer, Field::Message, track);
+                dump_field(&mut out, "ARRANGER", layer, Field::Arranger, track);
+                dump_field(&mut out, "ISRC", layer, Field::UpcEan, track);
             }
 
             writeln!(&mut out).unwrap();
