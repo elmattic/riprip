@@ -157,66 +157,6 @@ mod usb_if {
     }
 }
 
-#[derive(Debug, Default)]
-struct Endpoints {
-    pub bulk_in: u8,
-    pub bulk_out: u8,
-}
-
-fn detect_bulk_endpoints<T: UsbContext>(device: &Device<T>) -> Result<Endpoints, rusb::Error> {
-    let mut endpoints = Endpoints::default();
-
-    let config_desc = device.active_config_descriptor()?;
-
-    for interface in config_desc.interfaces() {
-        for interface_desc in interface.descriptors() {
-            if interface_desc.class_code() == usb_if::CLASS_MASS_STORAGE {
-                for endpoint_desc in interface_desc.endpoint_descriptors() {
-                    if endpoint_desc.transfer_type() == TransferType::Bulk {
-                        let address = endpoint_desc.address();
-
-                        match endpoint_desc.direction() {
-                            Direction::In => {
-                                endpoints.bulk_in = address;
-                            }
-                            Direction::Out => {
-                                endpoints.bulk_out = address;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(endpoints)
-}
-
-/// # USB Instance.
-///
-/// Pretty much all CD-related communications run through a single `LibusbInstance`
-/// object.
-pub(super) struct LibusbInstance<C: UsbContext = GlobalContext> {
-    /// # Device Handle.
-    device_handle: DeviceHandle<C>,
-
-    interface_id: u8,
-
-    endpoints: Endpoints,
-
-    cbw_tag: AtomicU32,
-
-    cdtext: Option<Vec<u8>>,
-}
-
-impl<C: UsbContext> Drop for LibusbInstance<C> {
-    fn drop(&mut self) {
-        if let Err(e) = self.device_handle.release_interface(self.interface_id) {
-            eprintln!("Error releasing USB interface {}: {}", self.interface_id, e);
-        }
-    }
-}
-
 fn find_and_open_device<C: UsbContext>(
     devices: DeviceList<C>,
     pid: u16,
@@ -268,6 +208,58 @@ fn find_and_open_cd_drive<C: UsbContext>(
             }
         })
         .unwrap_or(Err(RipRipError::DeviceOpen(None)))
+}
+
+fn detect_bulk_endpoints<T: UsbContext>(device: &Device<T>) -> Result<Endpoints, rusb::Error> {
+    let config_desc = device.active_config_descriptor()?;
+
+    let endpoints = config_desc
+        .interfaces()
+        .flat_map(|iface| iface.descriptors())
+        .filter(|iface_desc| iface_desc.class_code() == usb_if::CLASS_MASS_STORAGE)
+        .flat_map(|iface_desc| iface_desc.endpoint_descriptors())
+        .filter(|ep_desc| ep_desc.transfer_type() == TransferType::Bulk)
+        .fold(Endpoints::default(), |mut acc, ep_desc| {
+            match ep_desc.direction() {
+                Direction::In => acc.bulk_in = ep_desc.address(),
+                Direction::Out => acc.bulk_out = ep_desc.address(),
+            }
+            acc
+        });
+
+    Ok(endpoints)
+}
+
+#[derive(Debug, Default)]
+struct Endpoints {
+    pub bulk_in: u8,
+    pub bulk_out: u8,
+}
+
+/// # USB Instance.
+///
+/// Pretty much all CD-related communications run through a single `LibusbInstance`
+/// object.
+pub(super) struct LibusbInstance<C: UsbContext = GlobalContext> {
+    /// # USB Device.
+    device_handle: DeviceHandle<C>,
+
+    interface_id: u8,
+    
+    endpoints: Endpoints,
+    
+    cbw_tag: AtomicU32,
+    
+    /// # CD-Text.
+    cdtext: Option<Vec<u8>>,
+}
+
+impl<C: UsbContext> Drop for LibusbInstance<C> {
+    fn drop(&mut self) {
+        if let Err(e) = self.device_handle.release_interface(self.interface_id) {
+            eprintln!("Error releasing USB interface {}: {}", self.interface_id, e);
+        }
+    }
 }
 
 impl<C: UsbContext> LibusbInstance<C> {
